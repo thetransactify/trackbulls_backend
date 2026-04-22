@@ -106,6 +106,7 @@ cd /var/www/html/trackbulls_backend
 cp .env.example .env          # fill in values
 pip install -r requirements.txt
 python -m app.db.init_db      # creates tables + seeds admin
+python scripts/seed_instruments.py  # seeds sample instruments + holding
 uvicorn app.main:app --reload --port 8000
 ```
 For SQLite (no PostgreSQL needed): set `USE_SQLITE=true` in `.env`
