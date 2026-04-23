@@ -17,10 +17,11 @@ class FundamentalsInput:
     debt_equity: Optional[float] = None
     fii_pct: Optional[float] = None
     dii_pct: Optional[float] = None
-    fii_trend: str = "NEUTRAL"       # INCREASING | DECREASING | NEUTRAL
-    management_score: int = 5        # 1–10 analyst rating
-    macro_alignment: int = 5         # 1–10 macro fit score
-    cap_bucket: str = "LARGE"        # LARGE | MID | SMALL
+    market_cap: Optional[float] = None   # in crores
+    fii_trend: str = "NEUTRAL"           # INCREASING | DECREASING | NEUTRAL
+    management_score: int = 5            # 1–10 analyst rating
+    macro_alignment: int = 5             # 1–10 macro fit score
+    cap_bucket: str = "LARGE"            # LARGE | MID | SMALL
 
 
 @dataclass
@@ -33,13 +34,14 @@ class ScoreResult:
 
 
 # Thresholds per cap bucket
+# mc_min is in crores (₹ Cr): LARGE ≥ ₹2L Cr, MID ≥ ₹20K Cr, SMALL ≥ ₹1K Cr
 RULES = {
-    "LARGE": {"pe_min": 10, "pe_max": 60, "roe_min": 15, "debt_max": 1.5,
-              "fii_dii_min": 25, "growth_window": "5yr"},
-    "MID":   {"pe_min": 10, "pe_max": 80, "roe_min": 12, "debt_max": 2.0,
-              "fii_dii_min": 15, "growth_window": "3yr"},
+    "LARGE": {"pe_min": 10, "pe_max": 60,  "roe_min": 15, "debt_max": 1.5,
+              "fii_dii_min": 25, "mc_min": 200000, "growth_window": "5yr"},
+    "MID":   {"pe_min": 10, "pe_max": 80,  "roe_min": 12, "debt_max": 2.0,
+              "fii_dii_min": 15, "mc_min": 20000,  "growth_window": "3yr"},
     "SMALL": {"pe_min": 5,  "pe_max": 100, "roe_min": 10, "debt_max": 2.5,
-              "fii_dii_min": 5,  "growth_window": "2yr"},
+              "fii_dii_min": 5,  "mc_min": 1000,   "growth_window": "2yr"},
 }
 
 
@@ -141,6 +143,20 @@ def score_equity(data: FundamentalsInput) -> ScoreResult:
     macro_score = data.macro_alignment * 10
     add_factor("macro_alignment", macro_score, 6, data.macro_alignment >= 5,
                f"Macro alignment {data.macro_alignment}/10")
+
+    # 10. Market cap consistency (weight: 4)
+    mc_min = rules["mc_min"]
+    if data.market_cap is not None:
+        if data.market_cap >= mc_min:
+            mc_score = min(100, 60 + (data.market_cap - mc_min) / mc_min * 10)
+            add_factor("market_cap_consistency", mc_score, 4, True,
+                       f"Market cap ₹{data.market_cap/100:.0f}Cr ≥ expected for {data.cap_bucket}")
+        else:
+            mc_score = max(0, (data.market_cap / mc_min) * 40)
+            add_factor("market_cap_consistency", mc_score, 4, False,
+                       f"Market cap ₹{data.market_cap/100:.0f}Cr below expected for {data.cap_bucket}")
+    else:
+        add_factor("market_cap_consistency", 50, 4, False, "Market cap data missing")
 
     # ─── Final score ───────────────────────────────────────────────────────
     final_score = (weighted_sum / total_weight) if total_weight > 0 else 0.0

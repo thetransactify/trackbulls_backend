@@ -86,6 +86,69 @@ def seed_tcs_fundamentals(db, tcs_id: int) -> None:
     print("  added TCS fundamentals (pe=28.5, roe=45.2, eps_growth=12.5, sales_growth=15.0)")
 
 
+FUNDAMENTALS_DATA = [
+    # symbol        pe     roe    eps    sales       profit    debt_eq  fii    dii    mktcap    eps_g  sales_g  profit_g
+    ("INFY",       26.2,  32.1,  62.5,  153000.0,  26040.0,  0.05,   15.2,   9.8,  620000.0,  12.5,   8.5,    10.2),
+    ("RELIANCE",   24.8,   9.2,  98.3,  877000.0,  67000.0,  0.44,   22.1,  14.3, 1950000.0,   8.2,  12.4,    15.3),
+    ("HDFCBANK",   18.5,  17.8,  82.4,  200000.0,  60000.0,  7.20,   28.4,  16.2, 1200000.0,  18.5,  20.1,    22.4),
+    ("WIPRO",      22.1,  18.4,  22.8,   90000.0,  11500.0,  0.18,    6.2,   8.4,  240000.0,   6.2,   4.8,     5.9),
+    ("TATAMOTORS",  8.2,  22.6,  45.2,  440000.0,  21000.0,  1.82,   18.6,  12.1,  310000.0,  32.1,  24.6,    45.8),
+    ("ADANIENT",   62.4,  12.8,  38.6,  240000.0,  10200.0,  2.18,    4.2,   9.6,  280000.0,  15.4,  28.2,    18.9),
+    ("IRCTC",      52.4,  38.2,  18.6,    4200.0,   1100.0,  0.02,    3.8,  11.2,   82000.0,  22.1,  18.5,    24.3),
+    ("ZOMATO",    280.0,   4.2,   1.8,   14200.0,    380.0,  0.08,   12.4,   8.6,  185000.0, 120.0,  68.2,   200.0),
+]
+
+
+def seed_all_fundamentals(db, symbol_id: dict[str, int]) -> None:
+    """Add fundamentals for all equity instruments. Skip if already exists for today."""
+    today = datetime.now(tz=timezone.utc).date()
+    today_dt = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+
+    for row in FUNDAMENTALS_DATA:
+        (symbol, pe, roe, eps, sales, profit, debt_eq,
+         fii, dii, mktcap, eps_g, sales_g, profit_g) = row
+
+        inst_id = symbol_id.get(symbol)
+        if not inst_id:
+            print(f"  skip  {symbol} fundamentals (instrument not found)")
+            continue
+
+        existing = (
+            db.query(FundamentalsSnapshot)
+            .filter(
+                FundamentalsSnapshot.instrument_id == inst_id,
+                FundamentalsSnapshot.as_of_date >= today_dt,
+            )
+            .first()
+        )
+        if existing:
+            print(f"  skip  {symbol} fundamentals (already exists for today)")
+            continue
+
+        snap = FundamentalsSnapshot(
+            instrument_id=inst_id,
+            as_of_date=datetime.now(tz=timezone.utc),
+            pe=pe,
+            roe=roe,
+            eps=eps,
+            sales=sales,
+            profit=profit,
+            debt_equity=debt_eq,
+            fii_pct=fii,
+            dii_pct=dii,
+            market_cap=mktcap,
+            extra_json={
+                "eps_growth":    eps_g,
+                "sales_growth":  sales_g,
+                "profit_growth": profit_g,
+            },
+        )
+        db.add(snap)
+        print(f"  added {symbol} fundamentals (pe={pe}, roe={roe}, market_cap={mktcap:.0f})")
+
+    db.commit()
+
+
 def seed_sample_holding(db, tcs_id: int) -> None:
     """Add one TCS holding only if no holdings exist yet."""
     if db.query(Holding).first():
@@ -113,6 +176,9 @@ def run():
 
         print("\n── Seeding TCS fundamentals ─────────────────────────────")
         seed_tcs_fundamentals(db, symbol_id["TCS"])
+
+        print("\n── Seeding all equity fundamentals ──────────────────────")
+        seed_all_fundamentals(db, symbol_id)
 
         print("\n── Seeding sample holding ───────────────────────────────")
         seed_sample_holding(db, symbol_id["TCS"])

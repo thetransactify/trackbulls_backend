@@ -13,6 +13,7 @@ from app.api.v1.endpoints import (
     instruments,
     reports,
     app_settings,
+    scoring,
 )
 
 api_router = APIRouter(prefix="/api/v1")
@@ -26,3 +27,4 @@ api_router.include_router(risk.router)
 api_router.include_router(instruments.router)
 api_router.include_router(reports.router)
 api_router.include_router(app_settings.router)
+api_router.include_router(scoring.router)
