@@ -56,13 +56,19 @@ def _latest_mcx_snapshot(db: Session, instrument_id: int) -> MarketSnapshot | No
     )
 
 
-def _active_macro_events(db: Session, commodity: str | None) -> list[MacroEvent]:
-    """Return macro events relevant to a commodity (or global events)."""
+def _active_macro_events(
+    db: Session,
+    commodity: str | None,
+    event_type: str | None = None,
+) -> list[MacroEvent]:
+    """Return macro events relevant to a commodity (or global events), optionally filtered by type."""
     q = db.query(MacroEvent)
     if commodity:
         q = q.filter(
             MacroEvent.tags_json["commodity"].as_string() == commodity
         )
+    if event_type:
+        q = q.filter(MacroEvent.type == event_type.upper())
     return q.order_by(MacroEvent.created_at.desc()).limit(20).all()
 
 
@@ -447,11 +453,12 @@ def get_mcx_dashboard(
 @router.get("/macro-events")
 def get_macro_events(
     commodity: Optional[str] = Query(None, description="CRUDEOIL|GOLD|SILVER"),
+    type: Optional[str] = Query(None, description="GEOPOLITICS|BUDGET|WEATHER|NEWS"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """List macro events. Filter by commodity tag or return all."""
-    events = _active_macro_events(db, commodity)
+    """List macro events. Filter by commodity tag and/or event type."""
+    events = _active_macro_events(db, commodity, event_type=type)
     return {
         "events": [
             {
