@@ -4,7 +4,75 @@ MCX commodity signal engine — bull/bear scoring
 Based on: supply/demand, geopolitics, budget, RSI, SMA, contract positioning
 """
 from dataclasses import dataclass, field
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.models.models import Instrument, MarketSnapshot, MacroEvent
+
+
+def get_current_mcx_session() -> tuple[str, str]:
+    """
+    Return (session_name, session_note) based on current IST time.
+    MCX hours: Morning 09:00–17:00 IST, Evening 17:00–23:30 IST, Closed otherwise.
+    """
+    now_utc = datetime.now(tz=timezone.utc)
+    # IST = UTC + 5:30
+    ist_hour = (now_utc.hour + 5) % 24
+    ist_minute = now_utc.minute
+    ist_total_minutes = ist_hour * 60 + ist_minute
+
+    morning_open  = 9 * 60       # 09:00
+    evening_start = 17 * 60      # 17:00
+    close_time    = 23 * 60 + 30 # 23:30
+
+    if morning_open <= ist_total_minutes < evening_start:
+        return "MORNING", "MCX morning session (09:00–17:00 IST)"
+    elif evening_start <= ist_total_minutes < close_time:
+        return "EVENING", "MCX evening session (17:00–23:30 IST)"
+    else:
+        return "CLOSED", "MCX market closed — signal for next open"
+
+
+def build_mcx_input_from_db(
+    instrument: "Instrument",
+    snapshot: "MarketSnapshot",
+    macro_events: list["MacroEvent"],
+) -> "MCXInput":
+    """Map DB objects to MCXInput dataclass. Derives macro impacts from MacroEvent records."""
+    geo_impact = "NEUTRAL"
+    budget_impact = "NEUTRAL"
+    weather_impact = "NEUTRAL"
+
+    # Sentiment priority: POSITIVE > NEGATIVE > NEUTRAL (last event of each type wins)
+    for event in macro_events:
+        ev_type = (event.type or "").upper()
+        sentiment = (event.sentiment or "NEUTRAL").upper()
+        if ev_type == "GEOPOLITICS":
+            geo_impact = sentiment
+        elif ev_type == "BUDGET":
+            budget_impact = sentiment
+        elif ev_type == "WEATHER":
+            weather_impact = sentiment
+
+    # Infer volume trend from OI change if available (fallback NEUTRAL)
+    volume_trend = "NEUTRAL"
+    if snapshot.volume is not None:
+        if snapshot.volume > 50000:
+            volume_trend = "RISING"
+        elif snapshot.volume < 15000:
+            volume_trend = "FALLING"
+
+    return MCXInput(
+        symbol=instrument.symbol,
+        rsi=snapshot.rsi,
+        sma_20=snapshot.sma_20,
+        current_price=snapshot.close,
+        volume_trend=volume_trend,
+        geopolitical_impact=geo_impact,
+        budget_impact=budget_impact,
+        weather_impact=weather_impact,
+    )
 
 
 @dataclass
@@ -25,6 +93,8 @@ class MCXInput:
     # Contract
     days_to_expiry: Optional[int] = None
     next_month_flow: str = "NEUTRAL"        # BUYING | SELLING | NEUTRAL (rollover signal)
+    # Session
+    trading_session: str = "UNKNOWN"        # MORNING | EVENING | CLOSED | UNKNOWN
 
 
 @dataclass
@@ -38,6 +108,8 @@ class MCXSignalResult:
     reasons: list = field(default_factory=list)
     expiry_warning: bool = False
     rollover_recommended: bool = False
+    session: str = "UNKNOWN"
+    session_note: str = ""
 
 
 def score_mcx(data: MCXInput) -> MCXSignalResult:
@@ -146,6 +218,10 @@ def score_mcx(data: MCXInput) -> MCXSignalResult:
             rollover_recommended = True    # Bull: consider rollover
             reasons.append("Bull position near expiry — consider rolling to next month")
 
+    session, session_note = get_current_mcx_session()
+    if data.trading_session != "UNKNOWN":
+        session = data.trading_session
+
     return MCXSignalResult(
         bull_score=bull_score,
         bear_score=bear_score,
@@ -156,4 +232,6 @@ def score_mcx(data: MCXInput) -> MCXSignalResult:
         reasons=reasons,
         expiry_warning=expiry_warning,
         rollover_recommended=rollover_recommended,
+        session=session,
+        session_note=session_note,
     )

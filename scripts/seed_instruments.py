@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db.session import SessionLocal
-from app.models.models import Instrument, FundamentalsSnapshot, MarketSnapshot, Holding, AssetType, CapBucket
+from app.models.models import Instrument, FundamentalsSnapshot, MarketSnapshot, MacroEvent, Holding, AssetType, CapBucket
 
 INSTRUMENTS = [
     # symbol       exchange  asset_type        sector            cap_bucket
@@ -223,6 +223,86 @@ def seed_sample_holding(db, tcs_id: int) -> None:
     print("  added holding: TCS × 10 @ ₹3850 (LARGE, invested=₹38,500)")
 
 
+MCX_SNAPSHOT_DATA = [
+    # symbol      close     open      high      low      rsi   sma_20   sma_50   volume   oi
+    ("CRUDEOIL",  6420.0,  6380.0,  6465.0,  6355.0,  44.2,  6280.0,  6150.0,  85000,  120000),
+    ("GOLD",     72400.0, 72100.0, 72650.0, 71950.0,  56.8, 71200.0, 70100.0,  18000,   32000),
+    ("SILVER",   88500.0, 88000.0, 89200.0, 87800.0,  62.4, 86400.0, 84200.0,  22000,   28000),
+]
+
+MCX_MACRO_EVENTS = [
+    # commodity   type            title                                                 sentiment
+    ("CRUDEOIL", "GEOPOLITICS",  "Middle East supply disruption risk elevated",         "POSITIVE"),
+    ("CRUDEOIL", "BUDGET",       "India crude import duty unchanged in budget",         "NEUTRAL"),
+    ("GOLD",     "GEOPOLITICS",  "Global uncertainty drives safe haven demand",         "POSITIVE"),
+    ("GOLD",     "BUDGET",       "Gold import duty reduced by 5% in budget",            "POSITIVE"),
+    ("SILVER",   "GEOPOLITICS",  "Industrial demand from EV sector rising",             "POSITIVE"),
+    ("SILVER",   "WEATHER",      "Mining output steady, no weather disruption",         "NEUTRAL"),
+]
+
+
+def seed_mcx_market_data(db, symbol_id: dict[str, int]) -> None:
+    """Add MCX market snapshots and macro events. Skip if already exist for today."""
+    today = datetime.now(tz=timezone.utc).date()
+    today_dt = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+
+    # ── Market snapshots ──────────────────────────────────────────────────────
+    for symbol, close, open_, high, low, rsi, sma_20, sma_50, volume, oi in MCX_SNAPSHOT_DATA:
+        inst_id = symbol_id.get(symbol)
+        if not inst_id:
+            print(f"  skip  {symbol} MCX snapshot (instrument not found)")
+            continue
+
+        existing = (
+            db.query(MarketSnapshot)
+            .filter(
+                MarketSnapshot.instrument_id == inst_id,
+                MarketSnapshot.ts >= today_dt,
+            )
+            .first()
+        )
+        if existing:
+            print(f"  skip  {symbol} MCX snapshot (already exists for today)")
+            continue
+
+        snap = MarketSnapshot(
+            instrument_id=inst_id,
+            ts=datetime.now(tz=timezone.utc),
+            open=open_,
+            high=high,
+            low=low,
+            close=close,
+            volume=float(volume),
+            oi=float(oi),
+            rsi=rsi,
+            sma_20=sma_20,
+            sma_50=sma_50,
+        )
+        db.add(snap)
+        print(f"  added {symbol} MCX snapshot (close={close}, rsi={rsi}, oi={oi})")
+
+    db.commit()
+
+    # ── Macro events ──────────────────────────────────────────────────────────
+    for commodity, ev_type, title, sentiment in MCX_MACRO_EVENTS:
+        existing = db.query(MacroEvent).filter(MacroEvent.title == title).first()
+        if existing:
+            print(f"  skip  macro event: \"{title[:50]}…\" (already exists)")
+            continue
+
+        event = MacroEvent(
+            type=ev_type,
+            title=title,
+            sentiment=sentiment,
+            effective_from=datetime.now(tz=timezone.utc),
+            tags_json={"commodity": commodity},
+        )
+        db.add(event)
+        print(f"  added macro event [{ev_type}] {sentiment}: {title[:60]}")
+
+    db.commit()
+
+
 def run():
     db = SessionLocal()
     try:
@@ -237,6 +317,9 @@ def run():
 
         print("\n── Seeding market snapshots ─────────────────────────────")
         seed_market_snapshots(db, symbol_id)
+
+        print("\n── Seeding MCX market data + macro events ───────────────")
+        seed_mcx_market_data(db, symbol_id)
 
         print("\n── Seeding sample holding ───────────────────────────────")
         seed_sample_holding(db, symbol_id["TCS"])

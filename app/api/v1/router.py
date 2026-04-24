@@ -14,6 +14,7 @@ from app.api.v1.endpoints import (
     reports,
     app_settings,
     scoring,
+    mcx,
 )
 
 api_router = APIRouter(prefix="/api/v1")
@@ -28,3 +29,4 @@ api_router.include_router(instruments.router)
 api_router.include_router(reports.router)
 api_router.include_router(app_settings.router)
 api_router.include_router(scoring.router)
+api_router.include_router(mcx.router)
