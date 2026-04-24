@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db.session import SessionLocal
-from app.models.models import Instrument, FundamentalsSnapshot, Holding, AssetType, CapBucket
+from app.models.models import Instrument, FundamentalsSnapshot, MarketSnapshot, Holding, AssetType, CapBucket
 
 INSTRUMENTS = [
     # symbol       exchange  asset_type        sector            cap_bucket
@@ -149,6 +149,61 @@ def seed_all_fundamentals(db, symbol_id: dict[str, int]) -> None:
     db.commit()
 
 
+MARKET_SNAPSHOT_DATA = [
+    # symbol       close    rsi   sma_20   sma_50    volume
+    ("TCS",       3920.0,  58.2,  3850.0,  3780.0,  1250000),
+    ("INFY",      1542.0,  52.4,  1510.0,  1480.0,  2100000),
+    ("RELIANCE",  2890.0,  61.2,  2820.0,  2750.0,  3400000),
+    ("HDFCBANK",  1685.0,  48.6,  1650.0,  1620.0,  4200000),
+    ("WIPRO",      298.0,  44.8,   292.0,   285.0,  1800000),
+    ("TATAMOTORS", 945.0,  55.4,   920.0,   895.0,  5600000),
+    ("ADANIENT",  2840.0,  68.2,  2780.0,  2650.0,  2100000),
+    ("IRCTC",      785.0,  42.6,   768.0,   745.0,   980000),
+    ("ZOMATO",     224.0,  72.4,   218.0,   205.0,  8900000),
+]
+
+
+def seed_market_snapshots(db, symbol_id: dict[str, int]) -> None:
+    """Add one MarketSnapshot per instrument for today. Skip if one already exists."""
+    today = datetime.now(tz=timezone.utc).date()
+    today_dt = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+
+    for symbol, close, rsi, sma_20, sma_50, volume in MARKET_SNAPSHOT_DATA:
+        inst_id = symbol_id.get(symbol)
+        if not inst_id:
+            print(f"  skip  {symbol} market snapshot (instrument not found)")
+            continue
+
+        existing = (
+            db.query(MarketSnapshot)
+            .filter(
+                MarketSnapshot.instrument_id == inst_id,
+                MarketSnapshot.ts >= today_dt,
+            )
+            .first()
+        )
+        if existing:
+            print(f"  skip  {symbol} market snapshot (already exists for today)")
+            continue
+
+        snap = MarketSnapshot(
+            instrument_id=inst_id,
+            ts=datetime.now(tz=timezone.utc),
+            open=round(close * 0.990, 2),
+            high=round(close * 1.015, 2),
+            low=round(close * 0.985, 2),
+            close=close,
+            volume=float(volume),
+            rsi=rsi,
+            sma_20=sma_20,
+            sma_50=sma_50,
+        )
+        db.add(snap)
+        print(f"  added {symbol} market snapshot (close={close}, rsi={rsi}, sma_20={sma_20})")
+
+    db.commit()
+
+
 def seed_sample_holding(db, tcs_id: int) -> None:
     """Add one TCS holding only if no holdings exist yet."""
     if db.query(Holding).first():
@@ -179,6 +234,9 @@ def run():
 
         print("\n── Seeding all equity fundamentals ──────────────────────")
         seed_all_fundamentals(db, symbol_id)
+
+        print("\n── Seeding market snapshots ─────────────────────────────")
+        seed_market_snapshots(db, symbol_id)
 
         print("\n── Seeding sample holding ───────────────────────────────")
         seed_sample_holding(db, symbol_id["TCS"])
