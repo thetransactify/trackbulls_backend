@@ -6,6 +6,9 @@ GET  /mcx/signals                           — list MCX signals (filters: statu
 GET  /mcx/dashboard                         — snapshot + signal for all 3 commodities
 GET  /mcx/macro-events                      — list macro events (filter: commodity)
 POST /mcx/macro-events                      — create macro event (FOUNDER only)
+GET  /mcx/session-status                    — current MCX session (no auth)
+GET  /mcx/contracts/{symbol}                — contract chain + rollover info
+POST /mcx/contracts/{symbol}/set-expiry     — set contract expiry (FOUNDER only)
 """
 import logging
 from datetime import datetime, timezone, timedelta
@@ -36,6 +39,10 @@ class MacroEventCreate(BaseModel):
     title: str
     sentiment: str              # POSITIVE | NEGATIVE | NEUTRAL
     commodity: Optional[str] = None  # CRUDEOIL | GOLD | SILVER | None = global
+
+
+class SetExpiryRequest(BaseModel):
+    expiry_date: str            # YYYY-MM-DD
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -129,6 +136,78 @@ def _save_mcx_signal(
     db.commit()
     db.refresh(sig)
     return sig
+
+
+def _get_mcx_instrument(db: Session, symbol: str) -> Instrument:
+    """Lookup an active MCX instrument by symbol, raise 404 if not found."""
+    inst = (
+        db.query(Instrument)
+        .filter(
+            Instrument.symbol == symbol.upper(),
+            Instrument.asset_type == AssetType.MCX,
+            Instrument.is_active == True,
+        )
+        .first()
+    )
+    if not inst:
+        raise HTTPException(status_code=404, detail=f"MCX instrument '{symbol.upper()}' not found")
+    return inst
+
+
+def _build_contract_info(inst: Instrument, snapshot: "MarketSnapshot | None") -> dict:
+    """Compute contract chain, expiry countdown, and rollover recommendation."""
+    today = datetime.now(tz=timezone.utc).date()
+
+    if inst.expiry:
+        expiry_dt   = inst.expiry
+        expiry_date = expiry_dt.date() if hasattr(expiry_dt, "date") else expiry_dt
+    else:
+        expiry_date = today + timedelta(days=25)
+
+    days_to_expiry = (expiry_date - today).days
+
+    if days_to_expiry <= 5:
+        recommendation = "EXIT"
+    elif days_to_expiry <= 10:
+        recommendation = "ROLLOVER"
+    else:
+        recommendation = "HOLD"
+
+    if days_to_expiry <= 3:
+        rollover_urgency = "IMMEDIATE"
+    elif days_to_expiry <= 10:
+        rollover_urgency = "SOON"
+    else:
+        rollover_urgency = "NOT_YET"
+
+    next_expiry      = expiry_date + timedelta(days=30)
+    next_days        = (next_expiry - today).days
+
+    # Infer next-month flow from OI: high OI = institutional accumulation (BUYING)
+    next_month_flow = "NEUTRAL"
+    if snapshot and snapshot.oi is not None:
+        if snapshot.oi > 100_000:
+            next_month_flow = "BUYING"
+        elif snapshot.oi < 20_000:
+            next_month_flow = "SELLING"
+
+    return {
+        "symbol": inst.symbol,
+        "current_month": {
+            "expiry_date":    str(expiry_date),
+            "days_to_expiry": days_to_expiry,
+            "latest_price":   snapshot.close  if snapshot else None,
+            "oi":             snapshot.oi     if snapshot else None,
+            "volume":         snapshot.volume if snapshot else None,
+            "recommendation": recommendation,
+        },
+        "next_month": {
+            "expiry_date":    str(next_expiry),
+            "days_to_expiry": next_days,
+            "next_month_flow": next_month_flow,
+        },
+        "rollover_urgency": rollover_urgency,
+    }
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -424,4 +503,140 @@ def create_macro_event(
         "commodity":      (event.tags_json or {}).get("commodity"),
         "effective_from": str(event.effective_from),
         "created_at":     str(event.created_at),
+    }
+
+
+@router.get("/session-status")
+def get_session_status():
+    """
+    Current MCX session status — no auth required.
+    MCX trading hours: weekdays 09:00–23:30 IST, Saturday 09:00–14:00 IST, Sunday closed.
+    Sessions: MORNING 09:00–13:00, AFTERNOON 13:00–17:00, EVENING 17:00–23:30, OFF_HOURS otherwise.
+    """
+    now_utc = datetime.now(tz=timezone.utc)
+    # Derive IST without pytz by offsetting UTC+5:30
+    ist          = now_utc + timedelta(hours=5, minutes=30)
+    ist_total    = ist.hour * 60 + ist.minute
+    weekday      = ist.weekday()            # 0=Mon … 5=Sat, 6=Sun
+
+    MORNING_OPEN    = 9  * 60        # 09:00
+    AFTERNOON_START = 13 * 60        # 13:00
+    EVENING_START   = 17 * 60        # 17:00
+    WEEKDAY_CLOSE   = 23 * 60 + 30  # 23:30
+    SATURDAY_CLOSE  = 14 * 60        # 14:00
+
+    current_session = "OFF_HOURS"
+    session_note    = ""
+    market_open     = False
+    next_session    = ""
+
+    if weekday == 6:                 # Sunday — fully closed
+        current_session = "OFF_HOURS"
+        session_note    = "MCX closed on Sundays"
+        market_open     = False
+        next_session    = "Monday morning session opens at 09:00 IST"
+
+    elif weekday == 5:               # Saturday — 09:00–14:00 only
+        if MORNING_OPEN <= ist_total < AFTERNOON_START:
+            current_session = "MORNING"
+            session_note    = "MCX Saturday morning session (09:00–13:00 IST)"
+            market_open     = True
+            next_session    = "Afternoon session at 13:00 IST (closes 14:00)"
+        elif AFTERNOON_START <= ist_total < SATURDAY_CLOSE:
+            current_session = "AFTERNOON"
+            session_note    = "MCX Saturday afternoon session (13:00–14:00 IST)"
+            market_open     = True
+            next_session    = "Closes at 14:00 IST — reopens Monday 09:00 IST"
+        else:
+            current_session = "OFF_HOURS"
+            session_note    = "MCX closed — Saturday trading ends at 14:00 IST"
+            market_open     = False
+            next_session    = "Monday morning session opens at 09:00 IST"
+
+    else:                            # Monday–Friday — full day 09:00–23:30
+        if MORNING_OPEN <= ist_total < AFTERNOON_START:
+            current_session = "MORNING"
+            session_note    = "MCX morning session (09:00–13:00 IST)"
+            market_open     = True
+            next_session    = "Afternoon session at 13:00 IST"
+        elif AFTERNOON_START <= ist_total < EVENING_START:
+            current_session = "AFTERNOON"
+            session_note    = "MCX afternoon session (13:00–17:00 IST)"
+            market_open     = True
+            next_session    = "Evening session at 17:00 IST"
+        elif EVENING_START <= ist_total < WEEKDAY_CLOSE:
+            current_session = "EVENING"
+            session_note    = "MCX evening session (17:00–23:30 IST)"
+            market_open     = True
+            next_session    = "Closes at 23:30 IST — reopens next trading day at 09:00 IST"
+        else:
+            current_session = "OFF_HOURS"
+            market_open     = False
+            if ist_total < MORNING_OPEN:
+                session_note = "MCX pre-market — off hours"
+                next_session = "Morning session opens at 09:00 IST today"
+            else:
+                # After 23:30
+                session_note = "MCX closed for the day"
+                if weekday == 4:    # Friday night → Saturday
+                    next_session = "Saturday morning session opens at 09:00 IST"
+                else:
+                    next_session = "Morning session opens at 09:00 IST tomorrow"
+
+    return {
+        "current_session": current_session,
+        "session_note":    session_note,
+        "market_open":     market_open,
+        "next_session":    next_session,
+        "ist_time":        ist.strftime("%Y-%m-%d %H:%M:%S IST"),
+    }
+
+
+@router.get("/contracts/{symbol}")
+def get_contract_info(
+    symbol: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Contract chain for a commodity: current month expiry, days to expiry,
+    rollover recommendation, and next-month forward flow.
+    Falls back to today+25 days if no expiry date is set on the instrument.
+    """
+    inst     = _get_mcx_instrument(db, symbol)
+    snapshot = _latest_mcx_snapshot(db, inst.id)
+    return _build_contract_info(inst, snapshot)
+
+
+@router.post("/contracts/{symbol}/set-expiry")
+def set_contract_expiry(
+    symbol: str,
+    body: SetExpiryRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_founder),
+):
+    """Set the contract expiry date for an MCX instrument. FOUNDER only."""
+    inst = _get_mcx_instrument(db, symbol)
+
+    try:
+        expiry_dt = datetime.strptime(body.expiry_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="expiry_date must be in YYYY-MM-DD format")
+
+    today = datetime.now(tz=timezone.utc).date()
+    if expiry_dt.date() <= today:
+        raise HTTPException(status_code=400, detail="expiry_date must be a future date")
+
+    inst.expiry = expiry_dt
+    db.commit()
+    db.refresh(inst)
+
+    snapshot = _latest_mcx_snapshot(db, inst.id)
+    return {
+        "message":   f"Expiry for {inst.symbol} updated to {body.expiry_date}",
+        "instrument_id": inst.id,
+        "symbol":    inst.symbol,
+        "exchange":  inst.exchange,
+        "expiry":    str(inst.expiry.date()),
+        **_build_contract_info(inst, snapshot),
     }
