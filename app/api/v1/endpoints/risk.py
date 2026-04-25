@@ -273,21 +273,28 @@ def kill_switch(
 ):
     activated_at = datetime.utcnow()
     orders_cancelled = db.query(Order).filter(
-        Order.status.in_([OrderStatus.CREATED, OrderStatus.SENT])
+        Order.status.in_([
+            OrderStatus.CREATED,
+            OrderStatus.SENT,
+            OrderStatus.ACKNOWLEDGED,
+            OrderStatus.PARTIAL_FILL,
+        ])
     ).update({"status": OrderStatus.CANCELLED}, synchronize_session=False)
     signals_rejected = db.query(Signal).filter(
-        Signal.status == SignalStatus.PENDING
+        Signal.status.in_([SignalStatus.PENDING, SignalStatus.APPROVED])
     ).update({"status": SignalStatus.REJECTED}, synchronize_session=False)
 
-    alert = Alert(
+    alert_msg = (
+        f"KILL SWITCH activated by {current_user.username} at "
+        f"{activated_at.isoformat()} — "
+        f"{orders_cancelled} orders cancelled, {signals_rejected} signals rejected "
+        f"(PENDING + APPROVED)"
+    )
+    db.add(Alert(
         severity=AlertSeverity.CRITICAL,
         category="RISK",
-        message=(
-            f"Kill switch activated by {current_user.username} "
-            f"at {activated_at.isoformat()}"
-        ),
-    )
-    db.add(alert)
+        message=alert_msg,
+    ))
     db.add(AuditLog(
         actor_user_id=current_user.id,
         action="KILL_SWITCH_ACTIVATED",
@@ -308,6 +315,7 @@ def kill_switch(
         "activated_by": current_user.username,
         "orders_cancelled": orders_cancelled,
         "signals_rejected": signals_rejected,
+        "signals_detail": "Both PENDING and APPROVED signals rejected",
         "message": "Kill switch activated. All trading halted.",
     }
 
