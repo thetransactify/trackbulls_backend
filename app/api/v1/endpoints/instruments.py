@@ -19,7 +19,7 @@ from typing import Optional
 from app.db.session import get_db
 from app.core.deps import get_current_user, require_founder
 from app.models.models import (
-    Instrument, Score, FundamentalsSnapshot, Holding,
+    Instrument, Score, FundamentalsSnapshot, Holding, MarketSnapshot,
     User, AssetType, CapBucket,
 )
 
@@ -68,7 +68,12 @@ def _fund_dict(f: FundamentalsSnapshot | None) -> dict | None:
     }
 
 
-def _screener_row(inst: Instrument, score: Score | None, fund: FundamentalsSnapshot | None) -> dict:
+def _screener_row(
+    inst: Instrument,
+    score: Score | None,
+    fund: FundamentalsSnapshot | None,
+    market: MarketSnapshot | None = None,
+) -> dict:
     return {
         "id":               inst.id,
         "symbol":           inst.symbol,
@@ -89,6 +94,7 @@ def _screener_row(inst: Instrument, score: Score | None, fund: FundamentalsSnaps
         "profit":           fund.profit if fund else None,
         "market_cap":       fund.market_cap if fund else None,
         "has_fundamentals": fund is not None,
+        "close_price":      market.close if market else None,
     }
 
 
@@ -106,6 +112,15 @@ def _latest_fund(db: Session, instrument_id: int) -> FundamentalsSnapshot | None
         db.query(FundamentalsSnapshot)
         .filter(FundamentalsSnapshot.instrument_id == instrument_id)
         .order_by(FundamentalsSnapshot.as_of_date.desc())
+        .first()
+    )
+
+
+def _latest_market(db: Session, instrument_id: int) -> MarketSnapshot | None:
+    return (
+        db.query(MarketSnapshot)
+        .filter(MarketSnapshot.instrument_id == instrument_id)
+        .order_by(MarketSnapshot.ts.desc())
         .first()
     )
 
@@ -177,8 +192,9 @@ def equity_screener(
     result = []
 
     for inst in instruments:
-        score = _latest_score(db, inst.id)
-        fund  = _latest_fund(db, inst.id)
+        score  = _latest_score(db, inst.id)
+        fund   = _latest_fund(db, inst.id)
+        market = _latest_market(db, inst.id)
 
         score_val = score.score_value if score else 0.0
         if score_val < min_score:
@@ -190,7 +206,7 @@ def equity_screener(
         if max_debt is not None and (fund is None or fund.debt_equity is None or fund.debt_equity > max_debt):
             continue
 
-        result.append(_screener_row(inst, score, fund))
+        result.append(_screener_row(inst, score, fund, market))
 
     # sorting
     if sort_by == "pe":
@@ -230,7 +246,7 @@ def get_mcx_instruments(
         .filter(Instrument.asset_type == AssetType.MCX, Instrument.is_active == True)
         .all()
     )
-    result = [_screener_row(inst, _latest_score(db, inst.id), _latest_fund(db, inst.id))
+    result = [_screener_row(inst, _latest_score(db, inst.id), _latest_fund(db, inst.id), _latest_market(db, inst.id))
               for inst in instruments]
     return {"count": len(result), "instruments": result}
 
@@ -258,7 +274,8 @@ def get_instrument_detail(
         .all()
     )
 
-    fund = _latest_fund(db, inst.id)
+    fund   = _latest_fund(db, inst.id)
+    market = _latest_market(db, inst.id)
 
     holding = (
         db.query(Holding)
@@ -281,6 +298,16 @@ def get_instrument_detail(
             "factors": scores[0].factors_json if scores else {},
             "ts":      str(scores[0].ts) if scores else None,
         } if scores else None,
+        "market_data": {
+            "close":  market.close  if market else None,
+            "open":   market.open   if market else None,
+            "high":   market.high   if market else None,
+            "low":    market.low    if market else None,
+            "rsi":    market.rsi    if market else None,
+            "sma_20": market.sma_20 if market else None,
+            "volume": market.volume if market else None,
+            "ts":     str(market.ts) if market else None,
+        },
         "fundamentals": _fund_dict(fund),
         "score_history": [
             {"value": s.score_value, "band": s.band.value if s.band else None, "ts": str(s.ts)}
