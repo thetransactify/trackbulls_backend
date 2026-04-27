@@ -1,5 +1,5 @@
 # CLAUDE.md — TrackBulls Backend
-> Read at the start of every session. Single source of truth as of Module 9.
+> Read at the start of every session. Single source of truth as of Module 10.
 
 ## Project
 | | |
@@ -34,12 +34,12 @@ python scripts/seed_instruments.py # seed sample instruments + holding
 | `api/v1/endpoints/reports.py` | Daily/monthly reports, equity curve, CSV export |
 | `api/v1/endpoints/scoring.py` | AI score leaderboard + per-instrument history |
 | `api/v1/endpoints/mcx.py` | MCX signals, contracts, macro events |
-| `api/v1/endpoints/app_settings.py` | Key-value settings + strategies |
+| `api/v1/endpoints/app_settings.py` | Typed settings, masked broker credentials, broker test, strategies |
 | `core/config.py` | Pydantic settings from `.env` (`DEFAULT_CAPITAL`, etc.) |
 | `core/security.py` | JWT encode/decode, bcrypt password hashing |
 | `core/deps.py` | `get_current_user`, `require_founder` FastAPI deps |
 | `db/session.py` | SQLAlchemy engine + `SessionLocal` + `get_db` |
-| `db/init_db.py` | `create_tables()` + seed default admin + strategies |
+| `db/init_db.py` | `create_tables()` + seed default admin + settings + strategies |
 | `models/models.py` | All 14 ORM models + enums |
 | `services/engines/equity_engine.py` | Equity scoring — pure function |
 | `services/engines/mcx_engine.py` | MCX bull/bear scoring — pure function |
@@ -48,7 +48,7 @@ python scripts/seed_instruments.py # seed sample instruments + holding
 | `services/engines/risk_engine.py` | Risk snapshot + rule evaluation — DB-aware |
 | `services/engines/report_engine.py` | Daily/monthly report + equity curve calcs |
 
-## All API Endpoints (76 total)
+## All API Endpoints (77 total)
 
 **Auth** `/auth`
 `POST /login` `POST /refresh` `GET /me` `POST /logout`
@@ -75,7 +75,7 @@ python scripts/seed_instruments.py # seed sample instruments + holding
 `GET /daily` `GET /monthly` `GET /equity-curve` `GET /performance` `GET /instruments` `GET /summary-cards` `GET /export/daily` `GET /export/monthly`
 
 **Settings** `/settings`
-`GET /` `POST /` `POST /broker` `GET /strategies` `POST /strategies/{id}`
+`GET /` `POST /` `POST /broker` `POST /broker/test` `GET /strategies` `POST /strategies/{id}`
 
 **Scoring** `/scoring`
 `GET /leaderboard` `GET /summary` `GET /needs-attention` `GET /equity/{id}/history` `POST /equity/{id}` `POST /equity/batch`
@@ -123,12 +123,13 @@ python scripts/seed_instruments.py # seed sample instruments + holding
 | 7 | Orders page — paper trading blotter, P&L, open positions, create order |
 | 8 | Risk Management — kill switch, risk rules, alerts, sidebar status dots |
 | 9 | Reports engine + Reports page — daily/monthly/performance/equity curve/exports |
+| 10 | Settings module — typed app settings, masked broker config, broker test, strategy configs |
 
 ## Coding Rules
 1. New endpoints → `app/api/v1/endpoints/` + register in `router.py`
 2. Always use `get_db` dependency — never create sessions manually
 3. Always use `get_current_user` or `require_founder` on every endpoint
-4. Config from `settings` — never hardcode thresholds or URLs
+4. Config from `settings` / `app_settings` — never hardcode thresholds or URLs
 5. `PAPER_MODE=true` by default — live requires explicit override
 6. Scoring engines (`equity_engine`, `mcx_engine`) must stay **pure** — no DB calls
 7. Use `generate_order_uid()` for all order UIDs
@@ -139,7 +140,6 @@ python scripts/seed_instruments.py # seed sample instruments + holding
 ## What Comes Next
 | Module | Plan |
 |---|---|
-| 10 | Settings page — broker API keys, strategy thresholds, AI config |
 | 11 | Reviews & Alerts UI — review scheduler, alert feed |
 | 12 | Zerodha Kite live integration — broker service, live orders |
 | 13 | Celery background jobs — signal generation, score refresh |
