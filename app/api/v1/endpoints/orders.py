@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, date, timezone, timedelta
+import json
 
 from app.db.session import get_db
 from app.core.deps import get_current_user, require_trader_or_above, require_founder
@@ -35,7 +36,8 @@ router = APIRouter(prefix="/orders", tags=["Orders"])
 # ── Request schemas ───────────────────────────────────────────────────────────
 
 class OrderCreate(BaseModel):
-    instrument_id: int
+    instrument_id: Optional[int] = None
+    symbol: Optional[str] = None
     side: SignalSide
     quantity: float
     price: float
@@ -65,6 +67,18 @@ def _enum_val(v) -> str:
     return v.value if hasattr(v, "value") else str(v)
 
 
+def _payload_dict(raw_payload_json) -> dict:
+    if isinstance(raw_payload_json, dict):
+        return raw_payload_json
+    if isinstance(raw_payload_json, str):
+        try:
+            parsed = json.loads(raw_payload_json)
+            return parsed if isinstance(parsed, dict) else {}
+        except (TypeError, ValueError):
+            return {}
+    return {}
+
+
 def _existing_positions_today(db: Session, instrument_id: int) -> list[dict]:
     """
     Order has no `instrument_id` column — link via signal.instrument_id, or fall back
@@ -85,7 +99,7 @@ def _existing_positions_today(db: Session, instrument_id: int) -> list[dict]:
             sig = db.query(Signal).filter(Signal.id == o.signal_id).first()
             sig_inst_id = sig.instrument_id if sig else None
         # raw_payload_json may also carry instrument_id from the create call
-        payload_inst = (o.raw_payload_json or {}).get("instrument_id")
+        payload_inst = _payload_dict(o.raw_payload_json).get("instrument_id")
         resolved_inst = sig_inst_id or payload_inst
         if resolved_inst == instrument_id:
             positions.append({
@@ -131,7 +145,7 @@ def _daily_loss_so_far(db: Session) -> float:
     total_loss = 0.0
     for o in today_orders:
         sig = db.query(Signal).filter(Signal.id == o.signal_id).first() if o.signal_id else None
-        inst_id = sig.instrument_id if sig else (o.raw_payload_json or {}).get("instrument_id")
+        inst_id = sig.instrument_id if sig else _payload_dict(o.raw_payload_json).get("instrument_id")
         if not inst_id:
             continue
         holding = db.query(Holding).filter(Holding.instrument_id == inst_id).first()
@@ -189,7 +203,7 @@ def _instrument_for_order(db: Session, o: Order) -> Optional[Instrument]:
         sig = db.query(Signal).filter(Signal.id == o.signal_id).first()
         if sig:
             return db.query(Instrument).filter(Instrument.id == sig.instrument_id).first()
-    inst_id = (o.raw_payload_json or {}).get("instrument_id")
+    inst_id = _payload_dict(o.raw_payload_json).get("instrument_id")
     if inst_id:
         return db.query(Instrument).filter(Instrument.id == inst_id).first()
     return None
@@ -202,7 +216,7 @@ def _serialize_order(o: Order, db: Session, with_pnl: bool = True) -> dict:
         if inst else None
     )
     sig = db.query(Signal).filter(Signal.id == o.signal_id).first() if o.signal_id else None
-    payload = o.raw_payload_json or {}
+    payload = _payload_dict(o.raw_payload_json)
 
     return {
         "id":             o.id,
@@ -237,9 +251,21 @@ def create_order(
     current_user: User = Depends(require_trader_or_above),
 ):
     """Create paper/live order with full pre-trade validation."""
-    instrument = db.query(Instrument).filter(Instrument.id == payload.instrument_id).first()
+    instrument = None
+    if payload.instrument_id is not None:
+        instrument = db.query(Instrument).filter(Instrument.id == payload.instrument_id).first()
+    elif payload.symbol:
+        instrument = (
+            db.query(Instrument)
+            .filter(Instrument.symbol == payload.symbol.upper(), Instrument.is_active == True)
+            .first()
+        )
+    else:
+        raise HTTPException(status_code=422, detail="instrument_id or symbol is required")
+
     if not instrument:
-        raise HTTPException(status_code=404, detail=f"Instrument {payload.instrument_id} not found")
+        ident = payload.instrument_id if payload.instrument_id is not None else payload.symbol
+        raise HTTPException(status_code=404, detail=f"Instrument {ident} not found")
 
     # Pull target/stop from linked signal (if any)
     target_pct = stop_pct = None
@@ -253,7 +279,7 @@ def create_order(
 
     # Build intent + run validation
     intent = OrderIntent(
-        instrument_id=payload.instrument_id,
+        instrument_id=instrument.id,
         signal_id=payload.signal_id,
         side=_enum_val(payload.side),
         quantity=payload.quantity,
@@ -265,7 +291,7 @@ def create_order(
     )
     capital            = settings.DEFAULT_CAPITAL
     daily_loss_so_far  = _daily_loss_so_far(db)
-    existing_positions = _existing_positions_today(db, payload.instrument_id)
+    existing_positions = [] if (payload.symbol and payload.instrument_id is None) else _existing_positions_today(db, instrument.id)
 
     result = validate_order(
         intent=intent,
@@ -290,7 +316,8 @@ def create_order(
     # Generate UID + create order — store full audit trail in raw_payload_json
     order_uid = generate_order_uid()
     raw_payload = {
-        "instrument_id":         payload.instrument_id,
+        "instrument_id":         instrument.id,
+        "symbol":                instrument.symbol,
         "signal_id":             payload.signal_id,
         "notes":                 payload.notes or "",
         "mode":                  _enum_val(payload.mode),
@@ -339,7 +366,7 @@ def create_order(
         entity_id=order.id,
         after={
             "uid":           order_uid,
-            "instrument_id": payload.instrument_id,
+            "instrument_id": instrument.id,
             "side":          _enum_val(payload.side),
             "quantity":      payload.quantity,
             "price":         payload.price,
@@ -821,7 +848,7 @@ def get_order(
         if inst else None
     )
     sig = db.query(Signal).filter(Signal.id == o.signal_id).first() if o.signal_id else None
-    payload = o.raw_payload_json or {}
+    payload = _payload_dict(o.raw_payload_json)
 
     return {
         **_serialize_order(o, db),
@@ -883,7 +910,7 @@ def update_order_notes(
     if not o:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    payload = dict(o.raw_payload_json or {})
+    payload = _payload_dict(o.raw_payload_json).copy()
     payload["notes"] = body.notes
     o.raw_payload_json = payload
 

@@ -133,7 +133,7 @@ python scripts/seed_instruments.py # seed sample instruments + holding
 6. Scoring engines (`equity_engine`, `mcx_engine`) must stay **pure** — no DB calls
 7. Use `generate_order_uid()` for all order UIDs
 8. Run `validate_order()` before every order creation
-9. `instrument_id` on orders stored in `raw_payload_json` — use `_order_instrument_id()` helper to resolve
+9. `instrument_id` on orders stored in `raw_payload_json` — use `_payload_dict()` / resolver helpers because legacy rows may store JSON as strings
 10. Static paths must be registered **before** `/{id}` paths to avoid FastAPI coercion errors
 
 ## What Comes Next
